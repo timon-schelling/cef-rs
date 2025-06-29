@@ -19,6 +19,25 @@
           extensions = [ "rust-src" "rust-analyzer" ];
         };
 
+        custom-cef = pkgs.cef-binary.overrideAttrs (finalAttrs: previousAttrs: {
+          version = "138.0.15";
+          gitRevision = "d0f1f64";
+          chromiumVersion = "138.0.7204.50";
+          srcHash = "sha256-9MeJCV0Q2dnOeQ+C5QWBxD6PVzZh9wnhICGI8ak3SAM=";
+          nativeBuildInputs = previousAttrs.nativeBuildInputs ++ [ pkgs.rsync ];
+          installPhase = ''
+            runHook preInstall
+
+            cd ..
+            mkdir -p $out
+            cp -r Release/* $out
+            cp -r Resources/* $out
+            rsync ./* $out --exclude Release --exclude Resources
+
+            runHook postInstall
+          '';
+        });
+
         nativeBuildInputs = with pkgs; [
           rustToolchain
           cargo
@@ -63,37 +82,25 @@
           pango
           vulkan-loader
           libgbm
+          custom-cef
         ] ++ lib.optionals stdenv.isLinux [
           # Linux-specific dependencies
           systemd
           udev
         ];
-
-        # Set up CEF environment
-        cefPath = "$HOME/.local/share/cef";
-
       in
       {
         devShells.default = pkgs.mkShell {
           inherit nativeBuildInputs buildInputs;
 
           shellHook = ''
-            export CEF_PATH="${cefPath}"
-            export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${cefPath}"
-            export DYLD_FALLBACK_LIBRARY_PATH="$DYLD_FALLBACK_LIBRARY_PATH:${cefPath}"
-
-            # Create CEF directory if it doesn't exist
-            mkdir -p "${cefPath}"
-
-            echo "CEF Rust development environment loaded"
-            echo "CEF_PATH: $CEF_PATH"
-            echo ""
-            echo "To install CEF binaries, run:"
-            echo "  cargo run -p export-cef-dir -- --force ${cefPath}"
+            export XDG_DATA_DIRS="$XDG_DATA_DIRS:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}"
           '';
 
           # Ensure libraries can be found
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs;
+          CEF_PATH = custom-cef;
+          CEF_PATH_NO_CHECK = true;
         };
 
         # Package for building the project
