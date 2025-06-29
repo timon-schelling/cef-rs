@@ -17,12 +17,37 @@ features = [ "dox" ]
 [dependencies]
 cef-dll-sys.workspace = true
 
+winit = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing = "0.1.41"
+bytemuck = { version = "1.23.1", features = ["derive"] }
+
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 plist.workspace = true
 serde.workspace = true
+
+[[example]]
+name = "simple_offscreen"
+path = "examples/simple_offscreen.rs"
+
+[[example]]
+name = "winit_only"
+path = "examples/winit_only.rs"
+
+[[example]]
+name = "minimal_test"
+path = "examples/minimal_test.rs"
+
+
+[[example]]
+name = "offscreen_winit"
+path = "examples/offscreen_winit.rs"
 
 [[example]]
 name = "cefsimple"
