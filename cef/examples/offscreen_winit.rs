@@ -3,22 +3,21 @@
 use cef::{args::Args, rc::*, *};
 use std::sync::{Arc, LazyLock, Mutex};
 use winit::{
-    application::ApplicationHandler,
-    event::*,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::{Window, WindowId},
+    application::ApplicationHandler, dpi::PhysicalSize, event::*, event_loop::{ActiveEventLoop, ControlFlow, EventLoop}, window::{Window, WindowId}
 };
 
 // CEF render handler for offscreen rendering
 struct OffscreenRenderHandler {
     object: *mut RcImpl<cef_dll_sys::_cef_render_handler_t, Self>,
+    dimensions: Arc<Mutex<(usize, usize)>>,
     frame_buffer: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl OffscreenRenderHandler {
-    fn new(frame_buffer: Arc<Mutex<Option<Vec<u8>>>>) -> RenderHandler {
+    fn new(frame_buffer: Arc<Mutex<Option<Vec<u8>>>>, dimensions: Arc<Mutex<(usize, usize)>>) -> RenderHandler {
         RenderHandler::new(Self {
             object: std::ptr::null_mut(),
+            dimensions,
             frame_buffer,
         })
     }
@@ -38,6 +37,7 @@ impl Clone for OffscreenRenderHandler {
         }
         Self {
             object: self.object,
+            dimensions: self.dimensions.clone(),
             frame_buffer: self.frame_buffer.clone(),
         }
     }
@@ -52,8 +52,6 @@ impl Rc for OffscreenRenderHandler {
     }
 }
 
-static VIEW_RECT: LazyLock<Mutex<Rect>> = LazyLock::new(|| Mutex::new(Rect { x: 0, y: 0, width: 1200, height: 800}));
-
 impl ImplRenderHandler for OffscreenRenderHandler {
     fn get_raw(&self) -> *mut cef_dll_sys::_cef_render_handler_t {
         self.object.cast()
@@ -61,7 +59,14 @@ impl ImplRenderHandler for OffscreenRenderHandler {
 
     fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>) {
         if let Some(rect) = rect {
-            *rect = VIEW_RECT.lock().unwrap().clone();
+            if let Ok(dimensions) = self.dimensions.lock() {
+                *rect = Rect {
+                    x: 0,
+                    y: 0,
+                    width: dimensions.0 as i32,
+                    height: dimensions.1 as i32,
+                };
+            }
         }
     }
 
@@ -75,14 +80,14 @@ impl ImplRenderHandler for OffscreenRenderHandler {
         width: ::std::os::raw::c_int,
         height: ::std::os::raw::c_int,
     ) {
-        // println!("CEF on_paint called: {}x{}", width, height);
         let buffer_size = (width * height * 4) as usize;
         unsafe {
             let buffer_slice = std::slice::from_raw_parts(buffer, buffer_size);
             if let Ok(mut frame_buffer) = self.frame_buffer.lock() {
                 *frame_buffer = Some(buffer_slice.to_vec());
-                // println!("Updated frame buffer with {} bytes", buffer_size);
             }
+            dbg!(buffer_slice.iter().take(4).collect::<Vec<_>>());
+            dbg!(buffer_slice.last());
         }
     }
 }
@@ -477,6 +482,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     fn update_texture(&mut self, data: &[u8], width: u32, height: u32) {
+
+
+
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("CEF Texture"),
             size: wgpu::Extent3d {
@@ -589,6 +597,8 @@ struct WinitApp {
     frame_buffer: Arc<Mutex<Option<Vec<u8>>>>,
     browser: Option<Browser>,
     cef_app: Option<App>,
+    dimensions: Arc<Mutex<(usize, usize)>>,
+    resize: Arc<Mutex<bool>>,
     mouse_position: Option<(i32, i32)>,
 }
 
@@ -600,6 +610,8 @@ impl WinitApp {
             frame_buffer: Arc::new(Mutex::new(None)),
             browser: None,
             cef_app: None,
+            dimensions: Arc::new(Mutex::new((1200, 800))),
+            resize: Arc::new(Mutex::new(true)),
             mouse_position: None,
         }
     }
@@ -607,22 +619,23 @@ impl WinitApp {
 
 impl ApplicationHandler for WinitApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("CEF Offscreen Rendering")
-                        .with_inner_size(winit::dpi::LogicalSize::new(800, 600)),
-                )
-                .unwrap(),
-        );
+        if let Ok(dimensions) = self.dimensions.lock() {
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        Window::default_attributes()
+                            .with_title("CEF Offscreen Rendering")
+                            .with_inner_size(winit::dpi::LogicalSize::new(dimensions.0 as u32, dimensions.1 as u32)),
+                    )
+                    .unwrap(),
+            );
+            let graphics_state = pollster::block_on(GraphicsState::new(window.clone()));
 
-        let graphics_state = pollster::block_on(GraphicsState::new(window.clone()));
+            self.window = Some(window);
+            self.graphics_state = Some(graphics_state);
 
-        self.window = Some(window);
-        self.graphics_state = Some(graphics_state);
-
-        println!("Winit window created and ready");
+            println!("Winit window created and ready");
+        };
     }
 
     fn window_event(
@@ -637,16 +650,10 @@ impl ApplicationHandler for WinitApp {
                 event_loop.exit();
             }
             WindowEvent::Resized(physical_size) => {
-                if let Some(graphics_state) = &mut self.graphics_state {
-                    graphics_state.resize(physical_size);
-                    dbg!(physical_size);
-
-                    if let Some(browser) = &self.browser {
-                        let mut guard = VIEW_RECT.lock().unwrap();
-                        guard.width = physical_size.width as i32;
-                        guard.height = physical_size.height as i32;
-                        drop(guard);
-                        browser.host().unwrap().was_resized();
+                if let Ok(mut resize) = self.resize.lock() {
+                    if let Ok(mut dimensions) = self.dimensions.lock() {
+                        *dimensions = (physical_size.width as usize, physical_size.height as usize);
+                        *resize = true;
                     }
                 }
             }
@@ -714,57 +721,70 @@ impl ApplicationHandler for WinitApp {
             //     }
             // }
             WindowEvent::RedrawRequested => {
-                // Process CEF message loop
-                do_message_loop_work();
+                if let Ok(mut resize) = self.resize.lock() {
 
-                let guard = VIEW_RECT.lock().unwrap().clone();
+                    if *resize {
+                        if let Some(browser) = &self.browser {
+                            browser.host().unwrap().was_resized();
+                        }
+                    }
 
-                // Check for new frame from CEF and update texture
-                if let Ok(frame_buffer) = self.frame_buffer.lock() {
-                    let rect = guard.clone();
-                    let width = rect.width as usize;
-                    let height = rect.height as usize;
-                    if let Some(data) = &*frame_buffer {
-                        if (width * height * 4) == data.len() {
+                    do_message_loop_work();
+
+                    if let Ok(dimensions) = self.dimensions.lock() {
+                        if *resize {
                             if let Some(graphics_state) = &mut self.graphics_state {
-                                graphics_state.update_texture(data, width as u32, height as u32);
+                                graphics_state.resize(PhysicalSize::new(dimensions.0 as u32, dimensions.1 as u32));
                             }
                         }
-                    } else {
-                        // No CEF frame yet, use test pattern
-                        if let Some(graphics_state) = &mut self.graphics_state {
-                            let mut test_data = vec![0u8; width * height * 4];
-                            for y in 0..height {
-                                for x in 0..width {
-                                    let idx = (y * width + x) * 4;
-                                    test_data[idx] = (x * 255 / width) as u8; // Blue
-                                    test_data[idx + 1] = (y * 255 / height) as u8; // Green
-                                    test_data[idx + 2] = 255; // Red
-                                    test_data[idx + 3] = 255; // Alpha
+                        if let Ok(frame_buffer) = self.frame_buffer.lock() {
+                            let width = dimensions.0;
+                            let height = dimensions.1;
+                            if let Some(data) = &*frame_buffer {
+                                if (width * height * 4) == data.len() {
+                                    if let Some(graphics_state) = &mut self.graphics_state {
+                                        graphics_state.update_texture(data, width as u32, height as u32);
+                                    }
+                                }
+                            } else {
+                                // No CEF frame yet, use test pattern
+                                if let Some(graphics_state) = &mut self.graphics_state {
+                                    let mut test_data = vec![0u8; width * height * 4];
+                                    for y in 0..height {
+                                        for x in 0..width {
+                                            let idx = (y * width + x) * 4;
+                                            test_data[idx] = (x * 255 / width) as u8; // Blue
+                                            test_data[idx + 1] = (y * 255 / height) as u8; // Green
+                                            test_data[idx + 2] = 255; // Red
+                                            test_data[idx + 3] = 255; // Alpha
+                                        }
+                                    }
+                                    graphics_state.update_texture(&test_data, width as u32, height as u32);
                                 }
                             }
-                            graphics_state.update_texture(&test_data, width as u32, height as u32);
                         }
-                    }
-                }
 
-                if let Some(graphics_state) = &mut self.graphics_state {
-                    match graphics_state.render() {
-                        Ok(_) => {}
-                        Err(wgpu::SurfaceError::Lost) => {
-                            if let Some(window) = &self.window {
-                                graphics_state.resize(window.inner_size());
+                        if let Some(graphics_state) = &mut self.graphics_state {
+                            match graphics_state.render() {
+                                Ok(_) => {}
+                                Err(wgpu::SurfaceError::Lost) => {
+                                    if let Some(window) = &self.window {
+                                        graphics_state.resize(window.inner_size());
+                                    }
+                                }
+                                Err(wgpu::SurfaceError::OutOfMemory) => {
+                                    event_loop.exit();
+                                }
+                                Err(e) => eprintln!("{:?}", e),
                             }
                         }
-                        Err(wgpu::SurfaceError::OutOfMemory) => {
-                            event_loop.exit();
-                        }
-                        Err(e) => eprintln!("{:?}", e),
-                    }
-                }
 
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+
+                        *resize = false;
+                    }
                 }
             }
             _ => {}
@@ -774,16 +794,17 @@ impl ApplicationHandler for WinitApp {
 
 impl WinitApp {
     fn create_cef_browser(&mut self) {
-        let render_handler = OffscreenRenderHandler::new(self.frame_buffer.clone());
+        let render_handler = OffscreenRenderHandler::new(self.frame_buffer.clone(), self.dimensions.clone());
         let mut client = OffscreenClient::new(render_handler);
 
-        let url = CefString::from("https://editor.graphite.rs");
+        let url = CefString::from("file:///home/user/workspace/test.html");
 
         let mut window_info = WindowInfo::default();
         window_info.windowless_rendering_enabled = 1;
 
         let mut settings = BrowserSettings::default();
         settings.windowless_frame_rate = 60;
+        settings.background_color = 0x0;
 
         let browser = browser_host_create_browser_sync(
             Some(&window_info),
